@@ -1,0 +1,12 @@
+[urls]
+icons=http://l-stat.livejournal.net/img
+images=/~vitus/lj/images
+archive=/~vitus/lj/html
+[directories]
+images=formatted/images
+archive=formatted/html
+dump=vitus_wagner
+[templates]
+post=post.html
+comment=comment.html
+

@@ -1,0 +1,180 @@
+#!/usr/bin/python
+# -*- encoding: utf-8 -*-
+"""
+Formats two files, downloaded by ljdump.py into HTML page using
+template.
+
+Syntax ljformatxml -t template -o file.html L-nnnn C-nnnn
+
+"""
+from ConfigParser import ConfigParser
+import xml.dom.minidom, xml.dom
+import re
+import sys,os,glob
+import codecs
+# Параметры конфигурации
+# Директория для симлинков
+# url картинки с человечком
+# Директория с результатами дампа
+# директория для картинки
+# шаблон для страницы поста
+# шаблон для блока комментария
+template={}
+urls={}
+dirs={}
+def read_templates(config):
+    global template
+    for i in ['post','comment']:
+        with codecs.open(config.get('templates',i),'r','utf-8') as f:
+            template[i]=f.read()
+
+
+def set_parameters(config):
+    global urls,dirs
+    for i in config.options('urls'):
+        urls[i]=config.get('urls',i)
+    for i in config.options('directories'):
+        dirs[i]=config.get('directories',i)
+
+def process_ljtag(m):
+    """
+    Receives lj tag match object with lj tag and returns
+    html text which should be used as replacement
+    Used to pass into re.sub
+    """
+    tag = m.group(0)
+    if tag.find("lj-cut")!=-1:
+        return ""
+    if tag.find('user=')!=-1:
+        name= re.search('user=[\'\"]?(\w+)[\'\"]?',tag).group(1)
+        title = re.search('title=[\"\']?([^"\'>]+)[\'\"]?',tag)
+        if title:
+            title = title.group(1)
+        else:
+            title=name
+        tag= '<a style="color: blue; font-weight: bold;" href="http://www.livejournal.com/users/%s/profile"><img src="%s">%s</a>'%(name,urls['icons']+"/userinfo.gif",title)
+        return tag
+    print "unknown lj tag: ",tag
+
+def process_text(text):
+      # Выделить оттуда текст, распарсить как html, заменяя lj-тэги
+      try:
+        text = re.sub("</?lj[^>]+>",process_ljtag,text)
+      except Exception as e:
+        print 'bad text :',text
+        raise e
+      text = re.sub("\r?\n","<br>",text)
+      # и заменяя img на локальные копии, если они есть. Если нет, писать в
+      # кеш картинок
+      # FIXME post_props[post_text] = re.sub("<img # [^>]+>",process_img.post_text)
+      return text
+def format_comments(cmt_list):
+    out=[]
+    for cmt in cmt_list:
+        if len(cmt['children']):
+            cmt['comments']=format_comments(cmt['children'])
+        else:
+            cmt['comments']=''
+        if 'user' in cmt:
+            cmt['userlink']=process_text('<lj user="%s">'%cmt['user'])
+        out.append(template['comment'] % cmt)
+    return ''.join(out)
+
+def do_post(postfile,commentfile,outputfile):
+    """
+    Handles one post. Returns post date, url, subject and tag list
+    """
+# Прочитать L-nnnn
+    post_xml = xml.dom.minidom.parse(postfile)
+    post_props = {'subject':'','taglist':''}
+    for n in post_xml.documentElement.childNodes:
+        if n.nodeType == xml.dom.Node.ELEMENT_NODE:
+            if n.nodeName == u'event':
+                post_props['text']=process_text(n.firstChild.nodeValue)
+            elif n.nodeName == u'props':
+            # Выделить необходимую метаинформацию
+                for n2 in n.childNodes:
+                    if n2.nodeType == xml.dom.Node.ELEMENT_NODE:
+                        post_props[str(n2.nodeName)] = n2.firstChild.nodeValue
+            else:
+                post_props[str(n.nodeName)] = n.firstChild.nodeValue
+
+    if not 'text' in post_props:
+        raise ValueError("No event node in ths post")
+    if 'picture_keyword' in post_props:
+        userpic=post_props['picture_keyword']
+    else:
+        userpic='_'
+    for fmt in ('jpg','gif','png'):
+        if os.access("%s/%s.%s" % (dirs['archive'],userpic,fmt),os.R_OK):
+            post_props['userpic']='%s/userpics/%s.%s'%(urls['images'],userpic,fmt)
+            break
+    if commentfile:
+        comment_xml = xml.dom.minidom.parse(  commentfile)
+    # We suppose that comments are already sorted accoridng to post time    
+        comment_tree = []
+        comment_hash = {}
+        comment_count = 0
+        for c in comment_xml.documentElement.childNodes:
+            if c.nodeType != xml.dom.Node.ELEMENT_NODE or c.nodeName != 'comment':
+                continue
+            comment={'date':'Unknown','children':[],'subject':'','userlink':'(Anonymous)'}
+            for i in c.childNodes:
+                if i.nodeType != xml.dom.Node.ELEMENT_NODE:
+                    continue
+                if i.nodeName == 'body':
+                    if i.firstChild is None:
+                        comment['body']='<b>Deleted comment</b>' 
+                    else:  
+                        comment['body']=process_text(i.firstChild.nodeValue)
+                else:
+                    tx=i.firstChild
+                    if tx:
+                        comment[str(i.nodeName)]=tx.nodeValue
+            comment_hash[comment['id']]=comment
+            if 'parentid' in comment and comment['parentid'] in comment_hash:
+                comment_hash[comment['parentid']]['children'].append(comment)
+                comment_count +=1
+            else:
+                comment_tree.append(comment)
+                
+        post_props['comments'] = format_comments(comment_tree)                
+        post_props['comment_count'] = comment_count
+    else:
+        post_props['comments'] = ''
+        post_props['comment_count'] = 0
+    page = template['post']%post_props
+
+    with codecs.open(outputfile,"w","utf-8") as f :
+        f.write(page)
+    return (post_props['logtime'],post_props['ditemid'],post_props['subject'],post_props['taglist'])
+
+
+
+
+if __name__ == '__main__':
+    config=ConfigParser()
+    if config.read(["ljmkstatic.conf"]) < 1:
+        raise ValueError("No config file found")
+    read_templates(config)
+    set_parameters(config)
+    for post_file in sorted(glob.glob(dirs['dump']+"/L-*")):
+        post_id = re.search("(\d+)$",post_file).group(1)
+        comment_file = dirs['dump']+"/C-"+post_id
+        outfile=dirs['dump']+"/"+post_id+".html"
+        try:
+            t1=os.stat(post_file).st_mtime
+            try:
+                t2=os.stat(comment_file).st_mtime
+            except OSError:
+                t2=0
+                comment_file = None
+            t3=os.stat(outfile).st_mtime
+            if t3 > t1 and t3 > t2:
+                continue
+        except OSError:
+            pass
+        print "Processing post L-%s"%post_id
+        (date,post_id,subject,tags) = do_post(post_file,comment_file,outfile)
+        # Fix me - update index structures
+
