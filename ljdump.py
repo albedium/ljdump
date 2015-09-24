@@ -25,6 +25,7 @@
 # Copyright (c) 2005-2010 Greg Hewgill and contributors
 
 import codecs, os, pickle, pprint, re, shutil, sys, urllib2, xml.dom.minidom, xmlrpclib
+import time
 from xml.sax import saxutils
 
 MimeExtensions = {
@@ -167,6 +168,7 @@ def ljdump(Server, Username, Password, Journal):
         userpics['*'] = r['defaultpicurl']
 
     while True:
+        time.sleep(0.2)
         r = server.LJ.XMLRPC.syncitems(dochallenge(server, {
             'username': Username,
             'ver': 1,
@@ -180,6 +182,7 @@ def ljdump(Server, Username, Password, Journal):
             if item['item'][0] == 'L':
                 print "Fetching journal entry %s (%s)" % (item['item'], item['action'])
                 try:
+                    time.sleep(0.2)
                     e = server.LJ.XMLRPC.getevents(dochallenge(server, {
                         'username': Username,
                         'ver': 1,
@@ -197,6 +200,10 @@ def ljdump(Server, Username, Password, Journal):
                     print "Error getting item: %s" % item['item']
                     pprint.pprint(x)
                     errors += 1
+                    if str(x).find("will be able to continue posting within an hour."):
+                        print "Waiting a hour"
+                        time.sleep(3600)
+                        continue
             lastsync = item['time']
             writelast(Journal, lastsync, lastmaxid)
 
@@ -241,18 +248,29 @@ def ljdump(Server, Username, Password, Journal):
     maxid = lastmaxid
     while True:
         try:
-            try:
+            try:   
+                time.sleep(0.2)
                 r = urllib2.urlopen(urllib2.Request(Server+"/export_comments.bml?get=comment_meta&startid=%d%s" % (maxid+1, authas), headers = {'Cookie': "ljsession="+ljsession}))
                 meta = xml.dom.minidom.parse(r)
             except Exception, x:
                 print "*** Error fetching comment meta, possibly not community maintainer?"
                 print "***", x
-                break
+                maxid += 200
+                continue 
         finally:
             try:
                 r.close()
             except AttributeError: # r is sometimes a dict for unknown reasons
                 pass
+        nxid=meta.getElementsByTagName("nextid")
+        if len(nxid):
+            nxid = nxid[0].firstChild.nodeValue
+        else:
+            nxid = None
+        print "Got meta data maxid = %d nextid=%s"%(
+            int(meta.getElementsByTagName("maxid")[0].firstChild.nodeValue),
+            nxid
+        )
         for c in meta.getElementsByTagName("comment"):
             id = int(c.getAttribute("id"))
             metacache[id] = {
@@ -283,8 +301,10 @@ def ljdump(Server, Username, Password, Journal):
                 meta = xml.dom.minidom.parse(r)
             except Exception, x:
                 print "*** Error fetching comment body, possibly not community maintainer?"
+                print "*** requested id %d "%(maxid+1)
+                maxid+=1
                 print "***", x
-                break
+                continue
         finally:
             r.close()
         for c in meta.getElementsByTagName("comment"):
